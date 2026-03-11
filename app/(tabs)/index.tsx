@@ -1,98 +1,155 @@
-import { Image } from 'expo-image';
-import { Platform, StyleSheet } from 'react-native';
-
-import { HelloWave } from '@/components/hello-wave';
-import ParallaxScrollView from '@/components/parallax-scroll-view';
-import { ThemedText } from '@/components/themed-text';
-import { ThemedView } from '@/components/themed-view';
-import { Link } from 'expo-router';
-
+import { askVoiceAssistant } from "@/services/api";
+import {
+  AudioModule,
+  RecordingPresets,
+  setAudioModeAsync,
+  useAudioPlayer,
+  useAudioRecorder,
+} from "expo-audio";
+import * as FileSystem from "expo-file-system/legacy";
+import React, { useMemo, useState } from "react";
+import { Alert, Button, StyleSheet, Text, View } from "react-native";
+import { SafeAreaView } from "react-native-safe-area-context";
 export default function HomeScreen() {
-  return (
-    <ParallaxScrollView
-      headerBackgroundColor={{ light: '#A1CEDC', dark: '#1D3D47' }}
-      headerImage={
-        <Image
-          source={require('@/assets/images/partial-react-logo.png')}
-          style={styles.reactLogo}
-        />
-      }>
-      <ThemedView style={styles.titleContainer}>
-        <ThemedText type="title">Welcome!</ThemedText>
-        <HelloWave />
-      </ThemedView>
-      <ThemedView style={styles.stepContainer}>
-        <ThemedText type="subtitle">Step 1: Try it</ThemedText>
-        <ThemedText>
-          Edit <ThemedText type="defaultSemiBold">app/(tabs)/index.tsx</ThemedText> to see changes.
-          Press{' '}
-          <ThemedText type="defaultSemiBold">
-            {Platform.select({
-              ios: 'cmd + d',
-              android: 'cmd + m',
-              web: 'F12',
-            })}
-          </ThemedText>{' '}
-          to open developer tools.
-        </ThemedText>
-      </ThemedView>
-      <ThemedView style={styles.stepContainer}>
-        <Link href="/modal">
-          <Link.Trigger>
-            <ThemedText type="subtitle">Step 2: Explore</ThemedText>
-          </Link.Trigger>
-          <Link.Preview />
-          <Link.Menu>
-            <Link.MenuAction title="Action" icon="cube" onPress={() => alert('Action pressed')} />
-            <Link.MenuAction
-              title="Share"
-              icon="square.and.arrow.up"
-              onPress={() => alert('Share pressed')}
-            />
-            <Link.Menu title="More" icon="ellipsis">
-              <Link.MenuAction
-                title="Delete"
-                icon="trash"
-                destructive
-                onPress={() => alert('Delete pressed')}
-              />
-            </Link.Menu>
-          </Link.Menu>
-        </Link>
+  const recorder = useAudioRecorder(RecordingPresets.HIGH_QUALITY);
+  const player = useAudioPlayer(null);
 
-        <ThemedText>
-          {`Tap the Explore tab to learn more about what's included in this starter app.`}
-        </ThemedText>
-      </ThemedView>
-      <ThemedView style={styles.stepContainer}>
-        <ThemedText type="subtitle">Step 3: Get a fresh start</ThemedText>
-        <ThemedText>
-          {`When you're ready, run `}
-          <ThemedText type="defaultSemiBold">npm run reset-project</ThemedText> to get a fresh{' '}
-          <ThemedText type="defaultSemiBold">app</ThemedText> directory. This will move the current{' '}
-          <ThemedText type="defaultSemiBold">app</ThemedText> to{' '}
-          <ThemedText type="defaultSemiBold">app-example</ThemedText>.
-        </ThemedText>
-      </ThemedView>
-    </ParallaxScrollView>
+  const [isRecording, setIsRecording] = useState(false);
+  const [isLoading, setIsLoading] = useState(false);
+  const [transcript, setTranscript] = useState("");
+  const [answer, setAnswer] = useState("");
+
+  const canRecord = useMemo(() => !isLoading, [isLoading]);
+
+  const startRecording = async () => {
+    try {
+      const permission = await AudioModule.requestRecordingPermissionsAsync();
+
+      if (!permission.granted) {
+        Alert.alert("Permission required", "Please allow microphone access.");
+        return;
+      }
+      await setAudioModeAsync({
+        allowsRecording: true,
+        playsInSilentMode: true,
+      });
+
+      await recorder.prepareToRecordAsync();
+      await recorder.record();
+      setIsRecording(true);
+      setTranscript("");
+      setAnswer("");
+    } catch (error) {
+      console.error(error);
+      Alert.alert("Error", "Could not start recording.");
+    }
+  };
+
+  const stopRecording = async () => {
+    try {
+      setIsRecording(false);
+      setIsLoading(true);
+
+      await recorder.stop();
+      const recordingUri = recorder.uri;
+
+      if (!recordingUri) {
+        throw new Error("No recording URI found.");
+      }
+
+      const result = await askVoiceAssistant(recordingUri);
+
+      setTranscript(result.transcript);
+      setAnswer(result.answerText);
+
+      if (result.audioBase64) {
+        const outputPath = FileSystem.cacheDirectory + "ai-response.mp3";
+
+        await FileSystem.writeAsStringAsync(outputPath, result.audioBase64, {
+          encoding: FileSystem.EncodingType.Base64,
+        });
+
+        player.replace({ uri: outputPath });
+        player.play();
+      }
+    } catch (error) {
+      console.error(error);
+      Alert.alert("Error", "Could not process your voice request.");
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  return (
+    <SafeAreaView style={styles.container}>
+      <Text style={styles.title}>Voice Top 10 App</Text>
+      <Text style={styles.subtitle}>
+        Ask something like: "Give me the top 10 reasons people fail interviews."
+      </Text>
+
+      <View style={styles.buttonWrap}>
+        {!isRecording ? (
+          <Button
+            title="Start Recording"
+            onPress={startRecording}
+            disabled={!canRecord}
+          />
+        ) : (
+          <Button title="Stop Recording" onPress={stopRecording} />
+        )}
+      </View>
+
+      {isRecording && <Text style={styles.status}>Listening...</Text>}
+      {isLoading && <Text style={styles.status}>Thinking...</Text>}
+
+      <View style={styles.card}>
+        <Text style={styles.label}>Transcript</Text>
+        <Text style={styles.content}>{transcript || "-"}</Text>
+      </View>
+
+      <View style={styles.card}>
+        <Text style={styles.label}>AI Answer</Text>
+        <Text style={styles.content}>{answer || "-"}</Text>
+      </View>
+    </SafeAreaView>
   );
 }
 
 const styles = StyleSheet.create({
-  titleContainer: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
+  container: {
+    flex: 1,
+    padding: 20,
+    gap: 16,
+    backgroundColor: "#fff",
   },
-  stepContainer: {
-    gap: 8,
+  title: {
+    fontSize: 24,
+    fontWeight: "700",
+  },
+  subtitle: {
+    fontSize: 14,
+    color: "#555",
+  },
+  buttonWrap: {
+    marginTop: 8,
     marginBottom: 8,
   },
-  reactLogo: {
-    height: 178,
-    width: 290,
-    bottom: 0,
-    left: 0,
-    position: 'absolute',
+  status: {
+    fontSize: 14,
+    color: "#007AFF",
+  },
+  card: {
+    padding: 16,
+    borderRadius: 12,
+    backgroundColor: "#f5f5f5",
+  },
+  label: {
+    fontWeight: "700",
+    marginBottom: 8,
+  },
+  content: {
+    fontSize: 15,
+    lineHeight: 22,
   },
 });
+
